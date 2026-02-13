@@ -1,0 +1,18 @@
+[project]
+name = "vla-so101"
+version = "0.1.0"
+description = "SmolVLA fine-tuning for SO-101 pick-and-place"
+requires-python = ">=3.10"
+dependencies = [
+    "lerobot[feetech,smolvla,kinematics]",
+]
+
+[tool.uv.sources]
+lerobot = { path = "../lerobot", editable = true }
+torch = [{ index = "pytorch-cuda" }]
+torchvision = [{ index = "pytorch-cuda" }]
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

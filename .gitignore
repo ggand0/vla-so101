@@ -1,3 +1,11 @@
+devlogs/
+outputs/
+tmp/
+resources/
+
+# URDF mesh assets (large binary STL files)
+models/assets/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
