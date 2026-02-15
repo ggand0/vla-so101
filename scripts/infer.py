@@ -26,6 +26,7 @@ from lerobot.scripts.rl.gym_manipulator import _IK_MOTOR_NAMES, _clamp_degrees
 from lerobot.utils.control_utils import init_keyboard_listener, predict_action
 from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.utils import get_safe_torch_device, init_logging
+from lerobot.utils.visualization_utils import _init_rerun, log_rerun_data
 
 # =============================================================================
 # Configuration
@@ -100,7 +101,7 @@ def reset_to_home(robot: SO101Follower) -> None:
     _interpolate_move(bus, home_joints, HOME_GRIPPER)
 
 
-def run_episode(robot: SO101Follower, policy, device, dataset_features, events, episode_time_s):
+def run_episode(robot: SO101Follower, policy, device, dataset_features, events, episode_time_s, display=False):
     """Run one inference episode: observe → predict → act at FPS."""
     policy.reset()
 
@@ -143,6 +144,9 @@ def run_episode(robot: SO101Follower, policy, device, dataset_features, events, 
         action = {key: action_values[i].item() for i, key in enumerate(action_keys)}
         robot.send_action(action)
 
+        if display:
+            log_rerun_data(obs_raw, action)
+
         step += 1
         busy_wait(1.0 / FPS - (time.perf_counter() - loop_start))
 
@@ -157,6 +161,7 @@ def main():
     )
     parser.add_argument("--num-rollouts", type=int, default=1, help="Number of episodes to run")
     parser.add_argument("--episode-time", type=float, default=EPISODE_TIME_S, help="Episode duration (s)")
+    parser.add_argument("--display", action="store_true", help="Show rerun visualizer")
     args = parser.parse_args()
 
     episode_time_s = args.episode_time
@@ -179,6 +184,9 @@ def main():
     action_features = hw_to_dataset_features(robot.action_features, "action", use_video=True)
     dataset_features = {**obs_features, **action_features}
 
+    if args.display:
+        _init_rerun(session_name="smolvla_inference")
+
     # Keyboard listener
     listener, events = init_keyboard_listener()
 
@@ -192,7 +200,7 @@ def main():
             logging.info("Press right arrow to start (or it starts automatically in 3s)")
             busy_wait(3.0)
 
-            steps = run_episode(robot, policy, device, dataset_features, events, episode_time_s)
+            steps = run_episode(robot, policy, device, dataset_features, events, episode_time_s, display=args.display)
             logging.info(f"Episode {ep + 1} complete: {steps} steps")
 
             if ep < args.num_rollouts - 1:
