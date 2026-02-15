@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
 from lerobot.datasets.utils import build_dataset_frame, hw_to_dataset_features
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.robots.so101_follower.config_so101_follower import SO101FollowerConfig
@@ -36,7 +37,7 @@ DEFAULT_CHECKPOINT = "outputs/train/smolvla_so101_pick_place/checkpoints/last/pr
 TASK = "Pick up the cube and place it in the bowl"
 
 FOLLOWER_PORT = "/dev/ttyACM0"
-WRIST_CAM = "/dev/video0"
+WRIST_CAM_SERIAL = "335122272499"  # Intel RealSense D405
 OVERHEAD_CAM = "/dev/video2"
 
 FPS = 30
@@ -53,11 +54,11 @@ def make_follower() -> SO101Follower:
         port=FOLLOWER_PORT,
         use_degrees=True,
         cameras={
-            "wrist": OpenCVCameraConfig(
-                index_or_path=WRIST_CAM,
+            "wrist": RealSenseCameraConfig(
+                serial_number_or_name=WRIST_CAM_SERIAL,
+                fps=FPS,
                 width=640,
                 height=480,
-                fps=FPS,
             ),
             "overhead": OpenCVCameraConfig(
                 index_or_path=OVERHEAD_CAM,
@@ -178,6 +179,10 @@ def main():
     # Build robot
     robot = make_follower()
     robot.connect()
+
+    # Log actual camera resolutions
+    for name, cam in robot.cameras.items():
+        logging.info(f"Camera '{name}': {cam.width}x{cam.height} @ {cam.fps}fps")
 
     # Dataset features (needed for build_dataset_frame to map obs keys)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", use_video=True)

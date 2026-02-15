@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "SmolVLA fine-tuning for SO-101 pick-and-place"
 requires-python = ">=3.10"
 dependencies = [
-    "lerobot[feetech,smolvla,kinematics]",
+    "lerobot[feetech,smolvla,kinematics,intelrealsense]",
 ]
 
 [tool.uv.sources]

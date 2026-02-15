@@ -18,6 +18,7 @@ import numpy as np
 import yaml
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import hw_to_dataset_features
 from lerobot.datasets.video_utils import VideoEncodingManager
@@ -42,18 +43,35 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _make_wrist_cam(cfg: dict):
+    """Build wrist camera config — RealSense SDK or OpenCV depending on config."""
+    cam_type = cfg.get("wrist_cam_type", "opencv")
+    width = cfg.get("wrist_cam_width", cfg["cam_width"])
+    height = cfg.get("wrist_cam_height", cfg["cam_height"])
+    fps = cfg.get("wrist_cam_fps", cfg["fps"])
+
+    if cam_type == "realsense":
+        return RealSenseCameraConfig(
+            serial_number_or_name=cfg["wrist_cam_serial"],
+            fps=fps,
+            width=width,
+            height=height,
+        )
+    return OpenCVCameraConfig(
+        index_or_path=cfg["wrist_cam"],
+        fps=fps,
+        width=width,
+        height=height,
+    )
+
+
 def make_follower(cfg: dict) -> SO101Follower:
     config = SO101FollowerConfig(
         id="ggando_so101_follower",
         port=cfg["follower_port"],
         use_degrees=True,
         cameras={
-            "wrist": OpenCVCameraConfig(
-                index_or_path=cfg["wrist_cam"],
-                width=cfg["cam_width"],
-                height=cfg["cam_height"],
-                fps=cfg["fps"],
-            ),
+            "wrist": _make_wrist_cam(cfg),
             "overhead": OpenCVCameraConfig(
                 index_or_path=cfg["overhead_cam"],
                 width=cfg["cam_width"],
@@ -162,6 +180,10 @@ def main():
     # Connect hardware
     robot.connect()
     teleop.connect()
+
+    # Log actual camera resolutions
+    for name, cam in robot.cameras.items():
+        logging.info(f"Camera '{name}': {cam.width}x{cam.height} @ {cam.fps}fps")
 
     # Init rerun viewer for live camera preview
     _init_rerun(session_name="recording")
