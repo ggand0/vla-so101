@@ -1,0 +1,18 @@
+# 30cm workspace — v3 dataset (50 episodes)
+repo_id: gtgando/so101_pick_place_smolvla_v3
+task: "Pick up the cube and place it in the bowl"
+
+num_episodes: 50
+episode_time_s: 10
+fps: 30
+
+follower_port: /dev/ttyACM0
+leader_port: /dev/ttyACM1
+wrist_cam: /dev/video0
+overhead_cam: /dev/video2
+cam_width: 640
+cam_height: 480
+
+home_joints_deg: [0.0, -104.66, 96.09, 48.92, 90.0]
+home_gripper: 5.0
+safe_joint_wait_s: 1.5

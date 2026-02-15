@@ -1,21 +1,21 @@
 """
-Custom recording script with placo-based IK reset between episodes.
+Custom recording script with joint-space reset between episodes.
 
 Reuses lerobot's recording infrastructure (record_loop, LeRobotDataset, etc.)
-but replaces the between-episodes reset with a 4-step IK reset sequence:
-  1. SAFE_JOINTS — all joints to 0° (arm extended forward), gripper open
-  2. Wrist top-down — wrist_flex=90°, wrist_roll=90°
-  3. Move ABOVE target — closed-loop IK to target + 7cm
-  4. Lower to target — closed-loop IK to final EE position
+but replaces the between-episodes reset with a 2-step interpolated reset:
+  1. SAFE_JOINTS - all joints to 0 (arm extended forward), gripper open
+  2. Interpolate to HOME position
 
 Usage:
-    uv run python scripts/record.py
-    uv run python scripts/record.py --resume
+    uv run python scripts/record.py --config configs/record_10cm.yaml
+    uv run python scripts/record.py --config configs/record_30cm.yaml --resume
 """
 
 import argparse
 import logging
+
 import numpy as np
+import yaml
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -36,63 +36,39 @@ from lerobot.utils.control_utils import (
 from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.utils import init_logging, log_say
 
-# =============================================================================
-# Configuration — edit these for your setup
-# =============================================================================
 
-HF_USER = "gtgando"
-#REPO_ID = f"{HF_USER}/so101_pick_place_smolvla_v2"
-REPO_ID = f"{HF_USER}/so101_pick_place_smolvla_v3"
-TASK = "Pick up the cube and place it in the bowl"
-
-FOLLOWER_PORT = "/dev/ttyACM0"
-LEADER_PORT = "/dev/ttyACM1"
-WRIST_CAM = "/dev/video0"
-OVERHEAD_CAM = "/dev/video2"
-
-NUM_EPISODES = 50
-EPISODE_TIME_S = 10
-FPS = 30
-
-# Home joint positions (degrees) — reset target
-# shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll
-HOME_JOINTS_DEG = np.array([0.0, -104.66, 96.09, 48.92, 90.0])
-HOME_GRIPPER = 5.0
-
-# Timings
-SAFE_JOINT_WAIT_S = 1.5
-HOME_JOINT_WAIT_S = 1.5
+def load_config(path: str) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
 
 
-def make_follower() -> SO101Follower:
-    """Create SO101 follower with use_degrees=True and front camera."""
+def make_follower(cfg: dict) -> SO101Follower:
     config = SO101FollowerConfig(
         id="ggando_so101_follower",
-        port=FOLLOWER_PORT,
+        port=cfg["follower_port"],
         use_degrees=True,
         cameras={
             "wrist": OpenCVCameraConfig(
-                index_or_path=WRIST_CAM,
-                width=640,
-                height=480,
-                fps=FPS,
+                index_or_path=cfg["wrist_cam"],
+                width=cfg["cam_width"],
+                height=cfg["cam_height"],
+                fps=cfg["fps"],
             ),
             "overhead": OpenCVCameraConfig(
-                index_or_path=OVERHEAD_CAM,
-                width=640,
-                height=480,
-                fps=FPS,
+                index_or_path=cfg["overhead_cam"],
+                width=cfg["cam_width"],
+                height=cfg["cam_height"],
+                fps=cfg["fps"],
             ),
         },
     )
     return SO101Follower(config)
 
 
-def make_leader() -> SO101Leader:
-    """Create SO101 leader with use_degrees=True."""
+def make_leader(cfg: dict) -> SO101Leader:
     config = SO101LeaderConfig(
         id="ggando_so101_leader",
-        port=LEADER_PORT,
+        port=cfg["leader_port"],
         use_degrees=True,
     )
     return SO101Leader(config)
@@ -114,35 +90,44 @@ def _interpolate_move(bus, target_joints: np.ndarray, gripper: float, steps: int
         busy_wait(dt)
 
 
-def ik_reset(robot: SO101Follower) -> None:
-    """
-    2-step interpolated joint-space reset: safe joints (all zeros) → home position.
-    """
+def reset_to_home(robot: SO101Follower, cfg: dict) -> None:
+    """2-step interpolated joint-space reset: safe joints (all zeros) -> home position."""
     bus = robot.bus
-    logging.info(f"Resetting to home joints: {HOME_JOINTS_DEG}")
+    home_joints = np.array(cfg["home_joints_deg"])
+    home_gripper = cfg["home_gripper"]
+
+    logging.info(f"Resetting to home joints: {home_joints}")
 
     # STEP 1: Snap to SAFE_JOINTS (all zeros) to avoid collisions
     safe_joints = _clamp_degrees(np.zeros(5))
     action_dict = {name: safe_joints[i] for i, name in enumerate(_IK_MOTOR_NAMES)}
-    action_dict["gripper"] = HOME_GRIPPER
+    action_dict["gripper"] = home_gripper
     bus.sync_write("Goal_Position", action_dict, num_retry=3)
-    busy_wait(SAFE_JOINT_WAIT_S)
+    busy_wait(cfg["safe_joint_wait_s"])
 
     # STEP 2: Interpolate to home position
-    home_joints = _clamp_degrees(HOME_JOINTS_DEG.copy())
-    _interpolate_move(bus, home_joints, HOME_GRIPPER)
+    home_clamped = _clamp_degrees(home_joints.copy())
+    _interpolate_move(bus, home_clamped, home_gripper)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Record SO101 episodes with IK reset")
+    parser = argparse.ArgumentParser(description="Record SO101 episodes with joint-space reset")
+    parser.add_argument("--config", type=str, required=True, help="Path to recording config YAML")
     parser.add_argument("--resume", action="store_true", help="Resume an interrupted recording session")
     args = parser.parse_args()
 
+    cfg = load_config(args.config)
     init_logging()
 
+    repo_id = cfg["repo_id"]
+    fps = cfg["fps"]
+    task = cfg["task"]
+    num_episodes = cfg["num_episodes"]
+    episode_time_s = cfg["episode_time_s"]
+
     # Build robot and teleoperator
-    robot = make_follower()
-    teleop = make_leader()
+    robot = make_follower(cfg)
+    teleop = make_leader(cfg)
 
     # Dataset features
     action_features = hw_to_dataset_features(robot.action_features, "action", use_video=True)
@@ -152,7 +137,7 @@ def main():
     # Create or resume dataset
     if args.resume:
         dataset = LeRobotDataset(
-            REPO_ID,
+            repo_id,
             batch_encoding_size=32,
         )
         if hasattr(robot, "cameras") and len(robot.cameras) > 0:
@@ -160,12 +145,12 @@ def main():
                 num_processes=0,
                 num_threads=4 * len(robot.cameras),
             )
-        sanity_check_dataset_robot_compatibility(dataset, robot, FPS, dataset_features)
+        sanity_check_dataset_robot_compatibility(dataset, robot, fps, dataset_features)
     else:
-        sanity_check_dataset_name(REPO_ID, policy_cfg=None)
+        sanity_check_dataset_name(repo_id, policy_cfg=None)
         dataset = LeRobotDataset.create(
-            REPO_ID,
-            FPS,
+            repo_id,
+            fps,
             robot_type=robot.name,
             features=dataset_features,
             use_videos=True,
@@ -186,10 +171,10 @@ def main():
 
     with VideoEncodingManager(dataset):
         recorded_episodes = 0
-        while recorded_episodes < NUM_EPISODES and not events["stop_recording"]:
-            # IK reset before each episode
+        while recorded_episodes < num_episodes and not events["stop_recording"]:
+            # Reset before each episode
             log_say("Resetting arm", play_sounds=True)
-            ik_reset(robot)
+            reset_to_home(robot, cfg)
 
             # Sync leader to follower position, then release torque for teleoperation
             follower_pos = robot.bus.sync_read("Present_Position", num_retry=3)
@@ -202,11 +187,11 @@ def main():
             record_loop(
                 robot=robot,
                 events=events,
-                fps=FPS,
+                fps=fps,
                 teleop=teleop,
                 dataset=dataset,
-                control_time_s=EPISODE_TIME_S,
-                single_task=TASK,
+                control_time_s=episode_time_s,
+                single_task=task,
                 display_data=True,
             )
 
@@ -220,7 +205,7 @@ def main():
 
             dataset.save_episode()
             recorded_episodes += 1
-            logging.info(f"Saved episode {recorded_episodes}/{NUM_EPISODES}")
+            logging.info(f"Saved episode {recorded_episodes}/{num_episodes}")
 
     log_say("Stop recording", play_sounds=True, blocking=True)
 
