@@ -42,7 +42,7 @@ from lerobot.utils.utils import init_logging, log_say
 
 HF_USER = "gtgando"
 #REPO_ID = f"{HF_USER}/so101_pick_place_smolvla_v2"
-REPO_ID = f"{HF_USER}/so101_pick_place_smolvla_v2"
+REPO_ID = f"{HF_USER}/so101_pick_place_smolvla_v3"
 TASK = "Pick up the cube and place it in the bowl"
 
 FOLLOWER_PORT = "/dev/ttyACM0"
@@ -50,7 +50,7 @@ LEADER_PORT = "/dev/ttyACM1"
 WRIST_CAM = "/dev/video0"
 OVERHEAD_CAM = "/dev/video2"
 
-NUM_EPISODES = 20
+NUM_EPISODES = 50
 EPISODE_TIME_S = 10
 FPS = 30
 
