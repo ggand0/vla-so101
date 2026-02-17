@@ -329,13 +329,17 @@ def main():
     except KeyboardInterrupt:
         logging.info("Interrupted by user")
     finally:
-        reset_to_home(robot, direct=args.direct_reset)
+        try:
+            reset_to_home(robot, direct=args.direct_reset)
+        except Exception as e:
+            logging.warning(f"Reset failed (robot may have disconnected): {e}")
         if recorder:
             recorder.stop()
             ffmpeg_proc.stdin.close()
             ffmpeg_proc.terminate()
-            ffmpeg_proc.wait()
+            # Drain stderr to avoid pipe deadlock, then wait for exit
             stderr_out = ffmpeg_proc.stderr.read().decode(errors="replace")
+            ffmpeg_proc.wait()
             if stderr_out:
                 logging.info(f"ffmpeg stderr:\n{stderr_out[-2000:]}")
             logging.info(f"Video saved to {record_path}")
