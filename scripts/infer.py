@@ -12,8 +12,13 @@ Usage:
 
 import argparse
 import logging
+import os
+import subprocess
+import threading
 import time
+from datetime import datetime
 
+import cv2
 import numpy as np
 import torch
 
@@ -26,7 +31,7 @@ from lerobot.robots.so101_follower.so101_follower import SO101Follower
 from lerobot.scripts.rl.gym_manipulator import _IK_MOTOR_NAMES, _clamp_degrees
 from lerobot.utils.control_utils import init_keyboard_listener, predict_action
 from lerobot.utils.robot_utils import busy_wait
-from lerobot.utils.utils import get_safe_torch_device, init_logging
+from lerobot.utils.utils import get_safe_torch_device, init_logging, log_say
 from lerobot.utils.visualization_utils import _init_rerun, log_rerun_data
 
 # =============================================================================
@@ -39,13 +44,75 @@ TASK = "Pick up the cube and place it in the bowl"
 FOLLOWER_PORT = "/dev/ttyACM0"
 WRIST_CAM_SERIAL = "335122272499"  # Intel RealSense D405
 OVERHEAD_CAM = "/dev/video2"
+OVERHEAD_MIC = "alsa_input.usb-046d_HD_Pro_Webcam_C920-02.analog-stereo"  # PipeWire source for webcam mic
 
 FPS = 30
-EPISODE_TIME_S = 15
+EPISODE_TIME_S = 10
 
 # Home joint positions (degrees) — same as record.py
 HOME_JOINTS_DEG = np.array([0.0, -104.66, 96.09, 48.92, 90.0])
 HOME_GRIPPER = 5.0
+
+
+def stitch_frame(overhead: np.ndarray, wrist: np.ndarray) -> np.ndarray:
+    """960x540 PiP: overhead fills background, wrist square in bottom-right.
+
+    Overhead 640x480 (RGB) -> scale to 960x720, center-crop height to 540.
+    Wrist 640x480 (RGB) -> center-crop to 480x480, scale to 240x240, overlay.
+    Returns BGR for cv2.VideoWriter.
+    """
+    PIP_SIZE = 240
+    BORDER = 2
+    MARGIN = 12
+
+    oh = cv2.resize(overhead, (960, 720))
+    canvas = oh[90:630, :]  # 540x960
+
+    wr_sq = wrist[:, 80:560]  # 480x480
+    wr_pip = cv2.resize(wr_sq, (PIP_SIZE, PIP_SIZE))
+
+    total = PIP_SIZE + 2 * BORDER
+    y = 540 - MARGIN - total
+    x = 960 - MARGIN - total
+    canvas[y:y + total, x:x + total] = 255
+    canvas[y + BORDER:y + BORDER + PIP_SIZE, x + BORDER:x + BORDER + PIP_SIZE] = wr_pip
+
+    return cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+
+
+class FrameRecorder:
+    """Background thread that captures camera frames at a fixed FPS and pipes to ffmpeg."""
+
+    def __init__(self, robot: SO101Follower, ffmpeg: subprocess.Popen, fps: int):
+        self._robot = robot
+        self._ffmpeg = ffmpeg
+        self._interval = 1.0 / fps
+        self._running = False
+        self._thread = None
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def _capture_loop(self):
+        while self._running:
+            t0 = time.perf_counter()
+            try:
+                overhead = self._robot.cameras["overhead"].async_read()
+                wrist = self._robot.cameras["wrist"].async_read()
+                frame = stitch_frame(overhead, wrist)
+                self._ffmpeg.stdin.write(frame.tobytes())
+            except Exception:
+                pass
+            elapsed = time.perf_counter() - t0
+            if elapsed < self._interval:
+                time.sleep(self._interval - elapsed)
 
 
 def make_follower() -> SO101Follower:
@@ -86,16 +153,17 @@ def _interpolate_move(bus, target_joints: np.ndarray, gripper: float, steps: int
         busy_wait(dt)
 
 
-def reset_to_home(robot: SO101Follower) -> None:
+def reset_to_home(robot: SO101Follower, direct: bool = False) -> None:
     bus = robot.bus
-    logging.info("Resetting to home position")
+    log_say("Resetting arm")
 
-    # Step 1: Snap to safe joints (all zeros)
-    safe_joints = _clamp_degrees(np.zeros(5))
-    action_dict = {name: safe_joints[i] for i, name in enumerate(_IK_MOTOR_NAMES)}
-    action_dict["gripper"] = HOME_GRIPPER
-    bus.sync_write("Goal_Position", action_dict, num_retry=3)
-    busy_wait(1.5)
+    if not direct:
+        # Step 1: Snap to safe joints (all zeros) first
+        safe_joints = _clamp_degrees(np.zeros(5))
+        action_dict = {name: safe_joints[i] for i, name in enumerate(_IK_MOTOR_NAMES)}
+        action_dict["gripper"] = HOME_GRIPPER
+        bus.sync_write("Goal_Position", action_dict, num_retry=3)
+        busy_wait(1.5)
 
     # Step 2: Interpolate to home position
     home_joints = _clamp_degrees(HOME_JOINTS_DEG.copy())
@@ -163,6 +231,11 @@ def main():
     parser.add_argument("--num-rollouts", type=int, default=1, help="Number of episodes to run")
     parser.add_argument("--episode-time", type=float, default=EPISODE_TIME_S, help="Episode duration (s)")
     parser.add_argument("--display", action="store_true", help="Show rerun visualizer")
+    parser.add_argument(
+        "--record", nargs="?", const="auto", default=None,
+        help="Record video. Optional path, defaults to recordings/infer_{timestamp}.mp4",
+    )
+    parser.add_argument("--direct-reset", action="store_true", help="Interpolate straight to home (skip safe position)")
     args = parser.parse_args()
 
     episode_time_s = args.episode_time
@@ -195,18 +268,57 @@ def main():
     # Keyboard listener
     listener, events = init_keyboard_listener()
 
+    # Recording — background thread captures frames at fixed FPS, ffmpeg handles A/V sync
+    recorder = None
+    ffmpeg_proc = None
+    record_path = None
+    if args.record is not None:
+        if args.record == "auto":
+            os.makedirs("recordings", exist_ok=True)
+            record_path = f"recordings/infer_{datetime.now():%Y%m%d_%H%M%S}.mp4"
+        else:
+            record_path = args.record
+            os.makedirs(os.path.dirname(record_path) or ".", exist_ok=True)
+        ffmpeg_proc = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-f", "rawvideo",
+                "-pixel_format", "bgr24",
+                "-video_size", "960x540",
+                "-framerate", str(FPS),
+                "-i", "pipe:0",
+                "-f", "pulse",
+                "-i", OVERHEAD_MIC,
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-shortest",
+                "-y", record_path,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        recorder = FrameRecorder(robot, ffmpeg_proc, FPS)
+        recorder.start()
+        logging.info(f"Recording to {record_path}")
+
     try:
         for ep in range(args.num_rollouts):
             if events["stop_recording"]:
                 break
 
             logging.info(f"--- Episode {ep + 1}/{args.num_rollouts} ---")
-            reset_to_home(robot)
+            reset_to_home(robot, direct=args.direct_reset)
+            log_say(f"Starting episode {ep + 1}")
             logging.info("Press right arrow to start (or it starts automatically in 3s)")
             busy_wait(3.0)
 
-            steps = run_episode(robot, policy, device, dataset_features, events, episode_time_s, display=args.display)
-            logging.info(f"Episode {ep + 1} complete: {steps} steps")
+            steps = run_episode(robot, policy, device, dataset_features, events, episode_time_s,
+                                display=args.display)
+            log_say("Episode ended")
 
             if ep < args.num_rollouts - 1:
                 logging.info("Waiting 2s before next episode...")
@@ -214,7 +326,12 @@ def main():
     except KeyboardInterrupt:
         logging.info("Interrupted by user")
     finally:
-        reset_to_home(robot)
+        reset_to_home(robot, direct=args.direct_reset)
+        if recorder:
+            recorder.stop()
+            ffmpeg_proc.stdin.close()
+            ffmpeg_proc.wait(timeout=10)
+            logging.info(f"Video saved to {record_path}")
         robot.disconnect()
         if listener is not None:
             listener.stop()
