@@ -18,7 +18,6 @@ import threading
 import time
 from datetime import datetime
 
-import cv2
 import numpy as np
 import torch
 
@@ -54,30 +53,14 @@ HOME_JOINTS_DEG = np.array([0.0, -104.66, 96.09, 48.92, 90.0])
 HOME_GRIPPER = 5.0
 
 
-def stitch_frame(overhead: np.ndarray, wrist: np.ndarray) -> np.ndarray:
-    """960x540 PiP: overhead fills background, wrist square in bottom-right.
-
-    Overhead 640x480 (RGB) -> scale to 960x720, center-crop height to 540.
-    Wrist 640x480 (RGB) -> center-crop to 480x480, scale to 240x240, overlay.
-    Returns BGR for cv2.VideoWriter.
-    """
-    PIP_SIZE = 240
-    BORDER = 2
-    MARGIN = 12
-
-    oh = cv2.resize(overhead, (960, 720))
-    canvas = oh[90:630, :]  # 540x960
-
-    wr_sq = wrist[:, 80:560]  # 480x480
-    wr_pip = cv2.resize(wr_sq, (PIP_SIZE, PIP_SIZE))
-
-    total = PIP_SIZE + 2 * BORDER
-    y = 540 - MARGIN - total
-    x = 960 - MARGIN - total
-    canvas[y:y + total, x:x + total] = 255
-    canvas[y + BORDER:y + BORDER + PIP_SIZE, x + BORDER:x + BORDER + PIP_SIZE] = wr_pip
-
-    return cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+# ffmpeg filter: overhead as background, wrist PiP bottom-right with white border.
+# Input is two 640x480 RGB frames stacked vertically (640x960).
+FFMPEG_FILTER = (
+    "[0:v]split=2[oh][wr];"
+    "[oh]crop=640:480:0:0,scale=960:720,crop=960:540:0:90[bg];"
+    "[wr]crop=480:480:80:480,scale=240:240,pad=244:244:2:2:white[pip];"
+    "[bg][pip]overlay=960-244-12:540-244-12[v]"
+)
 
 
 class FrameRecorder:
@@ -106,8 +89,8 @@ class FrameRecorder:
             try:
                 overhead = self._robot.cameras["overhead"].async_read()
                 wrist = self._robot.cameras["wrist"].async_read()
-                frame = stitch_frame(overhead, wrist)
-                self._ffmpeg.stdin.write(frame.tobytes())
+                combined = np.concatenate([overhead, wrist], axis=0)  # 640x960 RGB
+                self._ffmpeg.stdin.write(combined.tobytes())
             except Exception:
                 pass
             elapsed = time.perf_counter() - t0
@@ -282,13 +265,19 @@ def main():
         ffmpeg_proc = subprocess.Popen(
             [
                 "ffmpeg",
+                # Video input: two 640x480 frames stacked vertically (RGB)
                 "-f", "rawvideo",
-                "-pixel_format", "bgr24",
-                "-video_size", "960x540",
+                "-pixel_format", "rgb24",
+                "-video_size", "640x960",
                 "-framerate", str(FPS),
                 "-i", "pipe:0",
+                # Audio input
                 "-f", "pulse",
                 "-i", OVERHEAD_MIC,
+                # PiP compositing done by ffmpeg
+                "-filter_complex", FFMPEG_FILTER,
+                "-map", "[v]",
+                "-map", "1:a",
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-pix_fmt", "yuv420p",
