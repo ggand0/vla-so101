@@ -69,7 +69,7 @@ class FrameRecorder:
     def __init__(self, robot: SO101Follower, ffmpeg: subprocess.Popen, fps: int):
         self._robot = robot
         self._ffmpeg = ffmpeg
-        self._interval = 1.0 / fps
+        self._fps = fps
         self._running = False
         self._thread = None
 
@@ -84,18 +84,32 @@ class FrameRecorder:
             self._thread.join(timeout=2)
 
     def _capture_loop(self):
+        start = time.monotonic()
+        frames_written = 0
+
         while self._running:
-            t0 = time.perf_counter()
             try:
                 overhead = self._robot.cameras["overhead"].async_read()
                 wrist = self._robot.cameras["wrist"].async_read()
-                combined = np.concatenate([overhead, wrist], axis=0)  # 640x960 RGB
-                self._ffmpeg.stdin.write(combined.tobytes())
-            except Exception:
-                pass
-            elapsed = time.perf_counter() - t0
-            if elapsed < self._interval:
-                time.sleep(self._interval - elapsed)
+                combined = np.concatenate([overhead, wrist], axis=0)
+                raw = combined.tobytes()
+
+                # Write enough frames to match wall clock time
+                target = int((time.monotonic() - start) * self._fps) + 1
+                while frames_written < target:
+                    self._ffmpeg.stdin.write(raw)
+                    frames_written += 1
+
+                # Sleep until next frame is due
+                next_time = start + (frames_written + 1) / self._fps
+                sleep_for = next_time - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+            except Exception as e:
+                logging.warning(f"FrameRecorder error: {e}")
+                break
+
+        logging.info(f"FrameRecorder stopped: {frames_written} frames in {time.monotonic() - start:.1f}s")
 
 
 def make_follower() -> SO101Follower:
@@ -288,7 +302,7 @@ def main():
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
         recorder = FrameRecorder(robot, ffmpeg_proc, FPS)
         recorder.start()
@@ -319,7 +333,11 @@ def main():
         if recorder:
             recorder.stop()
             ffmpeg_proc.stdin.close()
-            ffmpeg_proc.wait(timeout=10)
+            ffmpeg_proc.terminate()
+            ffmpeg_proc.wait()
+            stderr_out = ffmpeg_proc.stderr.read().decode(errors="replace")
+            if stderr_out:
+                logging.info(f"ffmpeg stderr:\n{stderr_out[-2000:]}")
             logging.info(f"Video saved to {record_path}")
         robot.disconnect()
         if listener is not None:
