@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import logging
+from pathlib import Path
 
 import numpy as np
 import yaml
@@ -46,8 +47,8 @@ def load_config(path: str) -> dict:
 def _make_wrist_cam(cfg: dict):
     """Build wrist camera config — RealSense SDK or OpenCV depending on config."""
     cam_type = cfg.get("wrist_cam_type", "opencv")
-    width = cfg.get("wrist_cam_width", cfg["cam_width"])
-    height = cfg.get("wrist_cam_height", cfg["cam_height"])
+    width = cfg.get("wrist_cam_width", cfg.get("cam_width", 640))
+    height = cfg.get("wrist_cam_height", cfg.get("cam_height", 480))
     fps = cfg.get("wrist_cam_fps", cfg["fps"])
 
     if cam_type == "realsense":
@@ -66,19 +67,19 @@ def _make_wrist_cam(cfg: dict):
 
 
 def make_follower(cfg: dict) -> SO101Follower:
+    cameras = {"wrist": _make_wrist_cam(cfg)}
+    if "overhead_cam" in cfg:
+        cameras["overhead"] = OpenCVCameraConfig(
+            index_or_path=cfg["overhead_cam"],
+            width=cfg["cam_width"],
+            height=cfg["cam_height"],
+            fps=cfg["fps"],
+        )
     config = SO101FollowerConfig(
         id="ggando_so101_follower",
         port=cfg["follower_port"],
         use_degrees=True,
-        cameras={
-            "wrist": _make_wrist_cam(cfg),
-            "overhead": OpenCVCameraConfig(
-                index_or_path=cfg["overhead_cam"],
-                width=cfg["cam_width"],
-                height=cfg["cam_height"],
-                fps=cfg["fps"],
-            ),
-        },
+        cameras=cameras,
     )
     return SO101Follower(config)
 
@@ -176,6 +177,9 @@ def main():
             image_writer_threads=4 * len(robot.cameras),
             batch_encoding_size=32,
         )
+
+    # Re-init logging with DEBUG file log in dataset directory
+    init_logging(log_file=Path(dataset.root) / "record.log", file_level="DEBUG")
 
     # Connect hardware
     robot.connect()

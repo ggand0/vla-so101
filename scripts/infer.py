@@ -37,12 +37,12 @@ from lerobot.utils.visualization_utils import _init_rerun, log_rerun_data
 # Configuration
 # =============================================================================
 
-DEFAULT_CHECKPOINT = "outputs/train/smolvla_so101_pick_place/checkpoints/last/pretrained_model"
+DEFAULT_CHECKPOINT = "outputs/train/smolvla_so101_10cm_v3_dual/checkpoints/last/pretrained_model"
 TASK = "Pick up the cube and place it in the bowl"
 
 FOLLOWER_PORT = "/dev/ttyACM0"
 WRIST_CAM_SERIAL = "335122272499"  # Intel RealSense D405
-OVERHEAD_CAM = "/dev/video2"
+OVERHEAD_CAM = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920-video-index0"
 OVERHEAD_MIC = "alsa_input.usb-046d_HD_Pro_Webcam_C920-02.analog-stereo"  # PipeWire source for webcam mic
 
 FPS = 30
@@ -86,12 +86,16 @@ class FrameRecorder:
     def _capture_loop(self):
         start = time.monotonic()
         frames_written = 0
+        has_overhead = "overhead" in self._robot.cameras
 
         while self._running:
             try:
-                overhead = self._robot.cameras["overhead"].async_read()
                 wrist = self._robot.cameras["wrist"].async_read()
-                combined = np.concatenate([overhead, wrist], axis=0)
+                if has_overhead:
+                    overhead = self._robot.cameras["overhead"].async_read()
+                    combined = np.concatenate([overhead, wrist], axis=0)
+                else:
+                    combined = wrist
                 raw = combined.tobytes()
 
                 # Write enough frames to match wall clock time
@@ -112,25 +116,27 @@ class FrameRecorder:
         logging.info(f"FrameRecorder stopped: {frames_written} frames in {time.monotonic() - start:.1f}s")
 
 
-def make_follower() -> SO101Follower:
+def make_follower(no_overhead: bool = False) -> SO101Follower:
+    cameras = {
+        "wrist": RealSenseCameraConfig(
+            serial_number_or_name=WRIST_CAM_SERIAL,
+            fps=FPS,
+            width=640,
+            height=480,
+        ),
+    }
+    if not no_overhead:
+        cameras["overhead"] = OpenCVCameraConfig(
+            index_or_path=OVERHEAD_CAM,
+            width=640,
+            height=480,
+            fps=FPS,
+        )
     config = SO101FollowerConfig(
         id="ggando_so101_follower",
         port=FOLLOWER_PORT,
         use_degrees=True,
-        cameras={
-            "wrist": RealSenseCameraConfig(
-                serial_number_or_name=WRIST_CAM_SERIAL,
-                fps=FPS,
-                width=640,
-                height=480,
-            ),
-            "overhead": OpenCVCameraConfig(
-                index_or_path=OVERHEAD_CAM,
-                width=640,
-                height=480,
-                fps=FPS,
-            ),
-        },
+        cameras=cameras,
     )
     return SO101Follower(config)
 
@@ -233,6 +239,7 @@ def main():
         help="Record video. Optional path, defaults to recordings/infer_{timestamp}.mp4",
     )
     parser.add_argument("--direct-reset", action="store_true", help="Interpolate straight to home (skip safe position)")
+    parser.add_argument("--no-overhead", action="store_true", help="Skip overhead camera (wrist cam only)")
     args = parser.parse_args()
 
     episode_time_s = args.episode_time
@@ -247,7 +254,7 @@ def main():
     logging.info(f"Policy loaded on {device} ({sum(p.numel() for p in policy.parameters()) / 1e6:.0f}M params)")
 
     # Build robot
-    robot = make_follower()
+    robot = make_follower(no_overhead=args.no_overhead)
     robot.connect()
 
     # Log actual camera resolutions
@@ -276,8 +283,21 @@ def main():
         else:
             record_path = args.record
             os.makedirs(os.path.dirname(record_path) or ".", exist_ok=True)
-        ffmpeg_proc = subprocess.Popen(
-            [
+        if args.no_overhead:
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-f", "rawvideo",
+                "-pixel_format", "rgb24",
+                "-video_size", "640x480",
+                "-framerate", str(FPS),
+                "-i", "pipe:0",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p",
+                "-y", record_path,
+            ]
+        else:
+            ffmpeg_cmd = [
                 "ffmpeg",
                 # Video input: two 640x480 frames stacked vertically (RGB)
                 "-f", "rawvideo",
@@ -299,10 +319,12 @@ def main():
                 "-b:a", "128k",
                 "-shortest",
                 "-y", record_path,
-            ],
+            ]
+        ffmpeg_proc = subprocess.Popen(
+            ffmpeg_cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
         recorder = FrameRecorder(robot, ffmpeg_proc, FPS)
         recorder.start()
@@ -337,11 +359,12 @@ def main():
             recorder.stop()
             ffmpeg_proc.stdin.close()
             ffmpeg_proc.terminate()
-            # Drain stderr to avoid pipe deadlock, then wait for exit
-            stderr_out = ffmpeg_proc.stderr.read().decode(errors="replace")
-            ffmpeg_proc.wait()
-            if stderr_out:
-                logging.info(f"ffmpeg stderr:\n{stderr_out[-2000:]}")
+            try:
+                ffmpeg_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logging.warning("ffmpeg did not exit after SIGTERM, sending SIGKILL")
+                ffmpeg_proc.kill()
+                ffmpeg_proc.wait()
             logging.info(f"Video saved to {record_path}")
         robot.disconnect()
         if listener is not None:

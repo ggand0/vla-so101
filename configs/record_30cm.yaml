@@ -13,7 +13,7 @@ wrist_cam_serial: "335122272499"
 wrist_cam_fps: 30
 wrist_cam_width: 640
 wrist_cam_height: 480
-overhead_cam: /dev/video2
+overhead_cam: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920-video-index0
 cam_width: 640
 cam_height: 480
 

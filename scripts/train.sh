@@ -11,11 +11,11 @@ set -euo pipefail
 
 export RUST_LOG=error
 
-DATASET="gtgando/so101_pick_place_smolvla_v3"
-OUTPUT_DIR="outputs/train/smolvla_so101_pick_place"
-JOB_NAME="smolvla_so101_pick_place"
+DATASET="gtgando/so101_pick_place_10cm_v1"
+OUTPUT_DIR="outputs/train/smolvla_so101_10cm"
+JOB_NAME="smolvla_so101_10cm"
 
-uv run python scripts/train.py \
+exec uv run python scripts/train.py \
   --policy.path=lerobot/smolvla_base \
   --policy.device=cuda \
   --policy.push_to_hub=false \
